@@ -1,15 +1,26 @@
 package chat
 
 import (
+	"context"
 	"fmt"
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 )
 
-var Users map[string]*websocket.Conn
+var (
+	db    *redis.Client
+	Users map[string]*websocket.Conn
+)
 
 func init() {
-	Users = map[string]*websocket.Conn{}
+	Users = make(map[string]*websocket.Conn)
+	db = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+	db.FlushDB(context.Background())
 }
 
 type User struct {
@@ -27,7 +38,8 @@ const chat = "%s: %s"
 const left = "%s: has left the chat."
 
 func (u *User) Start() {
-	if _, ok := Users[u.nick]; ok {
+	_, err := db.HGet(context.Background(), "Users", u.nick).Result()
+	if err != redis.Nil {
 		err := u.peer.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(usernameHasBeenTaken, u.nick)))
 		if err != nil {
 			log.Error("failed to write message", err)
@@ -40,9 +52,14 @@ func (u *User) Start() {
 
 	Users[u.nick] = u.peer
 
-	err := u.peer.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(welcome, u.nick)))
+	err = db.HSet(context.Background(), "Users", u.nick, 0).Err()
 	if err != nil {
-		log.Error("failed to write message", err)
+		log.Error("failed to add new user ", err)
+	}
+
+	err = u.peer.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(welcome, u.nick)))
+	if err != nil {
+		log.Error("failed to write message ", err)
 	}
 
 	go func() {
@@ -66,11 +83,12 @@ func (u *User) Start() {
 }
 
 func (u *User) SendToChat(msg string) {
-	for nick, conn := range Users {
+	users := db.HGetAll(context.Background(), "Users")
+	for nick, _ := range users.Val() {
 		if nick == u.nick {
 			continue
 		}
-
+		conn := Users[nick]
 		err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
 		if err != nil {
 			log.Error("failed to write message", err)
@@ -81,5 +99,5 @@ func (u *User) SendToChat(msg string) {
 func (u *User) disconnect() {
 	u.SendToChat(fmt.Sprintf(left, u.nick))
 	u.peer.Close()
-	delete(Users, u.nick)
+	db.Del(context.Background(), u.nick)
 }
