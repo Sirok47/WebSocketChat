@@ -2,16 +2,14 @@ package main
 
 import (
 	"WebSocketChat/chat"
-	"context"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/websocket"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	log "github.com/sirupsen/logrus"
 	"html/template"
 	"net/http"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
-	"time"
 )
 
 var upgrader = websocket.Upgrader{
@@ -21,122 +19,61 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	http.Handle("/chat/", http.HandlerFunc(websocketHandler))
-	http.HandleFunc("/", home)
+	TokenValidation := middleware.JWTWithConfig(middleware.JWTConfig{
+		SigningKey: []byte(chat.Key),
+	})
 
-	server := http.Server{Addr: "localhost:8080", Handler: nil}
+	e := echo.New()
 
-	go func() {
-		err := server.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			log.Fatal("failed to start server", err)
-		}
-	}()
+	e.GET("/", home, TokenValidation)
 
-	exit := make(chan os.Signal, 1)
-	signal.Notify(exit, syscall.SIGTERM, syscall.SIGINT)
+	e.GET("/chat", websocketHandler)
 
-	<-exit
-	log.Println("exit signalled")
+	e.POST("/signup", chat.SignUp)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	e.GET("/login", chat.LogIn)
 
-	err := server.Shutdown(ctx)
-	if err != nil {
-		log.Fatal("failed to shutdown server")
-	}
-
-	log.Println("chat app exited")
+	e.Logger.Fatal(e.Start(":8080"))
 }
 
-func websocketHandler(rw http.ResponseWriter, req *http.Request) {
-	nick := strings.TrimPrefix(req.URL.Path, "/chat/")
+func getToken(c echo.Context) *chat.Session {
+	req := c.Request()
+	header := req.Header["Authorization"]
+	header = strings.Split(header[0], " ")
+	token, err := jwt.ParseWithClaims(header[1], &chat.Session{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(chat.Key), nil
+	})
+	if err != nil {
+		return nil
+	}
+	if claims, ok := token.Claims.(*chat.Session); ok && token.Valid {
+		return claims
+	}
+	return nil
+}
 
-	peer, err := upgrader.Upgrade(rw, req, nil)
+func websocketHandler(ctx echo.Context) error {
+	token := getToken(ctx)
+
+	peer, err := upgrader.Upgrade(ctx.Response().Writer, ctx.Request(), nil)
 	if err != nil {
 		log.Error("websocket conn failed ", err)
+		return err
 	}
 
-	chatSession := chat.NewUser(nick, peer)
+	chatSession := chat.NewSession(token.Nick, peer)
 	chatSession.Start()
+	return nil
 }
 
-func home(w http.ResponseWriter, r *http.Request) {
-	nick := strings.TrimPrefix(r.URL.Path, "/")
-	homeTemplate.Execute(w, "ws://"+r.Host+"/chat/"+nick)
+func home(ctx echo.Context) error {
+	homeTemplate, err := template.ParseFiles("page.html")
+	if homeTemplate == nil || err != nil {
+		log.Fatal("Unable to parse html, ", err)
+	}
+	err = homeTemplate.Execute(ctx.Response().Writer, "ws://localhost:8080/chat")
+	if err != nil {
+		log.Fatal("Unable to create page, ", err)
+	}
+	return nil
 }
-
-var homeTemplate = template.Must(template.New("").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<script>  
-window.addEventListener("load", function(evt) {
-    var output = document.getElementById("output");
-    var input = document.getElementById("input");
-    var ws;
-    var print = function(message) {
-        var d = document.createElement("div");
-        d.textContent = message;
-        output.appendChild(d);
-        output.scroll(0, output.scrollHeight);
-    };
-    document.getElementById("open").onclick = function(evt) {
-        if (ws) {
-            return false;
-        }
-        ws = new WebSocket("{{.}}");
-        ws.onopen = function(evt) {
-            print("OPEN");
-        }
-        ws.onclose = function(evt) {
-            print("CLOSE");
-            ws = null;
-        }
-        ws.onmessage = function(evt) {
-            print(evt.data);
-        }
-        ws.onerror = function(evt) {
-            print("ERROR: " + evt.data);
-        }
-        return false;
-    };
-    document.getElementById("send").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        print(input.value);
-        ws.send(input.value);
-        return false;
-    };
-    document.getElementById("close").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        ws.close();
-        return false;
-    };
-});
-</script>
-</head>
-<body>
-<table>
-<tr><td valign="top" width="50%">
-<p>Click "Open" to create a connection to the server, 
-"Send" to send a message to the server and "Close" to close the connection. 
-You can change the message and send multiple times.
-<p>
-<form>
-<button id="open">Open</button>
-<button id="close">Close</button>
-<p><input id="input" type="text" value="Hello world!">
-<button id="send">Send</button>
-</form>
-</td><td valign="top" width="50%">
-<div id="output" style="max-height: 70vh;overflow-y: scroll;"></div>
-</td></tr></table>
-</body>
-</html>
-`))
