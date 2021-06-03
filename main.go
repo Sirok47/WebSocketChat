@@ -37,8 +37,7 @@ func main() {
 }
 
 func getToken(c echo.Context) *chat.Session {
-	req := c.Request()
-	header := req.Header["Authorization"]
+	header := c.Request().Header["Authorization"]
 	header = strings.Split(header[0], " ")
 	token, err := jwt.ParseWithClaims(header[1], &chat.Session{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(chat.Key), nil
